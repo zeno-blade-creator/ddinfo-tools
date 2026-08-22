@@ -25,6 +25,10 @@ internal sealed partial class OSXMemoryService(ILogger logger) : INativeMemorySe
 	private uint _taskPort;
 	private int _taskPortProcessId;
 
+	// Our own task port, resolved once. 0 means nothing resolved yet.
+	private uint _selfTaskPort;
+	private bool _loggedSelfTaskFailure;
+
 	public void WriteMemory(Process process, long address, byte[] bytes, int offset, int size)
 	{
 		if (_loggedWriteFailure)
@@ -116,6 +120,65 @@ internal sealed partial class OSXMemoryService(ILogger logger) : INativeMemorySe
 		return processName.Replace(" ", string.Empty, StringComparison.Ordinal).ToLowerInvariant();
 	}
 
+	/// <summary>
+	/// Reads our own Mach task port, which <c>task_for_pid</c> needs as its first argument.
+	/// </summary>
+	/// <remarks>
+	/// There is deliberately no <c>mach_task_self</c> <see cref="LibraryImportAttribute"/> here. In
+	/// <c>&lt;mach/mach_init.h&gt;</c> <c>mach_task_self()</c> is not a function at all - it is a macro that expands
+	/// to the extern variable <c>mach_task_self_</c>:
+	/// <code>
+	/// extern mach_port_t mach_task_self_;
+	/// #define mach_task_self() mach_task_self_
+	/// </code>
+	/// libsystem_kernel does also export a legacy <c>mach_task_self</c> function symbol, so binding it happens to
+	/// work today, but the macro is the documented contract and the variable is what every other Mach caller on the
+	/// system reads. Resolving the variable is therefore the durable choice, and it cannot break the way an
+	/// undocumented compatibility export can.
+	/// </remarks>
+	private bool TryGetSelfTaskPort(out uint selfTask)
+	{
+		if (_selfTaskPort != 0)
+		{
+			selfTask = _selfTaskPort;
+			return true;
+		}
+
+		selfTask = 0;
+
+		string failure;
+		try
+		{
+			nint export = NativeLibrary.GetExport(NativeLibrary.Load("libc"), "mach_task_self_");
+
+			// mach_port_t is a 32-bit unsigned integer.
+			selfTask = (uint)Marshal.ReadInt32(export);
+			failure = selfTask == 0 ? "the symbol holds a null port" : string.Empty;
+		}
+		catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException or ArgumentNullException)
+		{
+			failure = string.Create(CultureInfo.InvariantCulture, $"resolving the symbol threw {ex.GetType().Name}: {ex.Message}");
+		}
+
+		if (failure.Length == 0)
+		{
+			_selfTaskPort = selfTask;
+			_loggedSelfTaskFailure = false;
+			return true;
+		}
+
+		selfTask = 0;
+
+		// Never throw out of here: this runs underneath GameMemoryServiceWrapper.Scan() on the render loop, so an
+		// escaping exception would take the whole app down instead of reporting the problem.
+		if (_loggedSelfTaskFailure)
+			return false;
+
+		_loggedSelfTaskFailure = true;
+		logger.Error("Could not read game memory: could not look up this process's own Mach task port because {Failure}. This build cannot read Devil Daggers' memory on this version of macOS.", failure);
+		return false;
+	}
+
 	private bool TryGetTaskPort(Process process, out uint task)
 	{
 		if (_taskPort != 0 && _taskPortProcessId == process.Id)
@@ -128,7 +191,13 @@ internal sealed partial class OSXMemoryService(ILogger logger) : INativeMemorySe
 		_taskPort = 0;
 		_taskPortProcessId = 0;
 
-		int kernReturn = TaskForPid(MachTaskSelf(), process.Id, out uint acquiredTask);
+		if (!TryGetSelfTaskPort(out uint selfTask))
+		{
+			task = 0;
+			return false;
+		}
+
+		int kernReturn = TaskForPid(selfTask, process.Id, out uint acquiredTask);
 		if (kernReturn == _kernSuccess && acquiredTask != 0)
 		{
 			_taskPort = acquiredTask;
@@ -202,10 +271,6 @@ internal sealed partial class OSXMemoryService(ILogger logger) : INativeMemorySe
 	[LibraryImport("libc", EntryPoint = "task_for_pid")]
 	[DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
 	private static partial int TaskForPid(uint targetTport, int pid, out uint task);
-
-	[LibraryImport("libc", EntryPoint = "mach_task_self")]
-	[DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
-	private static partial uint MachTaskSelf();
 
 	[LibraryImport("libc", EntryPoint = "mach_vm_read_overwrite")]
 	[DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
