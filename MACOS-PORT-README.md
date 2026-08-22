@@ -498,16 +498,25 @@ sudo DOTNET_ROOT="$HOME/.dotnet" \
 Then start a run, die, and read `~/ddinfo-crash.txt`.
 
 **Leading hypothesis**, to be confirmed or discarded against that output —
-`GameMemoryService.GetStatsBuffer()`:
+`PracticeStatsData.Populate`, the Run Analysis code path:
 
 ```csharp
-byte[] buffer = new byte[StatsBufferSize * MainBlock.StatsCount];   // 112 * int, in int arithmetic
+private readonly byte[] _statsBuffer = new byte[StatsBufferSize * 60 * 60];  // FIXED: 3600 entries
+...
+for (int i = 0; i < gameMemoryService.MainBlock.StatsCount; i++)  // BOUND: read from game memory
+{
+    int gemsCollected = br.ReadInt32();                            // runs off the end → throws
 ```
 
-`StatsCount` is read straight out of game memory with no bound check, and this overload is
-called from `RecordingLogic.cs:200`, which runs **when a run completes** — matching the
-symptom exactly. A garbage `StatsCount` overflows `112 * StatsCount` past `int.MaxValue`
-into a negative, and `new byte[negative]` throws on the render thread.
+The buffer is a fixed 3,600 entries; the loop bound is `StatsCount`, read out of game
+memory with no check. A `StatsCount` above 3,600 walks the `BinaryReader` past the end of
+the `MemoryStream` and throws `EndOfStreamException` on the render thread.
+
+**A previous version of this section blamed `RecordingLogic.cs:200` instead. That was
+wrong** — `UploadRun` returns early at line 155 when `encryptionService.IsAvailable` is
+false, and `encryption.ini` is a CI secret that is not in the repo, so that path is
+unreachable on any local build. Three sites read `StatsCount` unguarded; only the Run
+Analysis one is reachable without encryption.
 
 Why macOS specifically: it is the only platform whose block address is *scanned and
 cached* rather than read fresh from a game-maintained pointer. If the game moves or
