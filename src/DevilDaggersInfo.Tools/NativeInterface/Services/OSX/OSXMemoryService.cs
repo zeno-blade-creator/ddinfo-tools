@@ -124,17 +124,17 @@ internal sealed partial class OSXMemoryService(ILogger logger) : INativeMemorySe
 	/// Reads our own Mach task port, which <c>task_for_pid</c> needs as its first argument.
 	/// </summary>
 	/// <remarks>
-	/// There is deliberately no <c>mach_task_self</c> <see cref="LibraryImportAttribute"/> here. In
-	/// <c>&lt;mach/mach_init.h&gt;</c> <c>mach_task_self()</c> is not a function at all - it is a macro that expands
-	/// to the extern variable <c>mach_task_self_</c>:
+	/// libsystem_kernel exports <c>mach_task_self</c> as a real function, which <see cref="MachTaskSelf"/> binds, but
+	/// that export is a compatibility shim rather than the documented contract: in <c>&lt;mach/mach_init.h&gt;</c> the
+	/// call is a macro over an extern variable.
 	/// <code>
 	/// extern mach_port_t mach_task_self_;
 	/// #define mach_task_self() mach_task_self_
 	/// </code>
-	/// libsystem_kernel does also export a legacy <c>mach_task_self</c> function symbol, so binding it happens to
-	/// work today, but the macro is the documented contract and the variable is what every other Mach caller on the
-	/// system reads. Resolving the variable is therefore the durable choice, and it cannot break the way an
-	/// undocumented compatibility export can.
+	/// So the function is tried first and the variable is read as a fallback if a future macOS ever drops the export.
+	/// Both routes are wrapped, because an unresolvable P/Invoke throws at its call site - which for a memory service
+	/// is inside GameMemoryServiceWrapper.Scan() on the ~300 Hz render loop, where an escaping exception would take the
+	/// whole app down instead of reporting the problem.
 	/// </remarks>
 	private bool TryGetSelfTaskPort(out uint selfTask)
 	{
@@ -146,37 +146,75 @@ internal sealed partial class OSXMemoryService(ILogger logger) : INativeMemorySe
 
 		selfTask = 0;
 
-		string failure;
+		string functionFailure = TryReadSelfTaskPortFromFunction(out selfTask);
+		if (functionFailure.Length > 0)
+		{
+			string variableFailure = TryReadSelfTaskPortFromVariable(out selfTask);
+			if (variableFailure.Length > 0)
+			{
+				selfTask = 0;
+
+				if (_loggedSelfTaskFailure)
+					return false;
+
+				_loggedSelfTaskFailure = true;
+				logger.Error("Could not read game memory: could not look up this process's own Mach task port. mach_task_self() failed because {FunctionFailure}, and reading the mach_task_self_ variable failed because {VariableFailure}. This build cannot read Devil Daggers' memory on this version of macOS.", functionFailure, variableFailure);
+				return false;
+			}
+		}
+
+		_selfTaskPort = selfTask;
+		_loggedSelfTaskFailure = false;
+		return true;
+	}
+
+	/// <summary>
+	/// Calls the exported <c>mach_task_self</c> function. Returns an empty string on success, or a description of why
+	/// it could not be used.
+	/// </summary>
+	private static string TryReadSelfTaskPortFromFunction(out uint selfTask)
+	{
+		selfTask = 0;
+
+		try
+		{
+			selfTask = MachTaskSelf();
+		}
+		catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
+		{
+			return string.Create(CultureInfo.InvariantCulture, $"the symbol could not be resolved ({ex.GetType().Name}: {ex.Message})");
+		}
+
+		if (selfTask != 0)
+			return string.Empty;
+
+		return "it returned a null port";
+	}
+
+	/// <summary>
+	/// Reads the <c>mach_task_self_</c> extern variable that <c>mach_task_self()</c> is a macro over. Returns an empty
+	/// string on success, or a description of why it could not be used.
+	/// </summary>
+	private static string TryReadSelfTaskPortFromVariable(out uint selfTask)
+	{
+		selfTask = 0;
+
 		try
 		{
 			nint export = NativeLibrary.GetExport(NativeLibrary.Load("libc"), "mach_task_self_");
 
 			// mach_port_t is a 32-bit unsigned integer.
 			selfTask = (uint)Marshal.ReadInt32(export);
-			failure = selfTask == 0 ? "the symbol holds a null port" : string.Empty;
 		}
 		catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException or ArgumentNullException)
 		{
-			failure = string.Create(CultureInfo.InvariantCulture, $"resolving the symbol threw {ex.GetType().Name}: {ex.Message}");
+			return string.Create(CultureInfo.InvariantCulture, $"resolving the symbol threw {ex.GetType().Name}: {ex.Message}");
 		}
 
-		if (failure.Length == 0)
-		{
-			_selfTaskPort = selfTask;
-			_loggedSelfTaskFailure = false;
-			return true;
-		}
+		if (selfTask != 0)
+			return string.Empty;
 
-		selfTask = 0;
-
-		// Never throw out of here: this runs underneath GameMemoryServiceWrapper.Scan() on the render loop, so an
-		// escaping exception would take the whole app down instead of reporting the problem.
-		if (_loggedSelfTaskFailure)
-			return false;
-
-		_loggedSelfTaskFailure = true;
-		logger.Error("Could not read game memory: could not look up this process's own Mach task port because {Failure}. This build cannot read Devil Daggers' memory on this version of macOS.", failure);
-		return false;
+		return "the symbol holds a null port";
 	}
 
 	private bool TryGetTaskPort(Process process, out uint task)
@@ -268,6 +306,10 @@ internal sealed partial class OSXMemoryService(ILogger logger) : INativeMemorySe
 	// macOS has no process_vm_readv equivalent; reading another process goes through Mach. These signatures were
 	// verified against the running game. Mach calls report failure through their kern_return_t result rather than
 	// errno, so there is nothing to gain from SetLastError here.
+	[LibraryImport("libc", EntryPoint = "mach_task_self")]
+	[DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
+	private static partial uint MachTaskSelf();
+
 	[LibraryImport("libc", EntryPoint = "task_for_pid")]
 	[DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
 	private static partial int TaskForPid(uint targetTport, int pid, out uint task);
