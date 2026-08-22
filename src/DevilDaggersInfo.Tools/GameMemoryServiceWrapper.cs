@@ -1,4 +1,5 @@
 using DevilDaggersInfo.Tools.GameMemory;
+using DevilDaggersInfo.Tools.NativeInterface.Services;
 using DevilDaggersInfo.Tools.Networking;
 using DevilDaggersInfo.Tools.Networking.TaskHandlers;
 using DevilDaggersInfo.Tools.Platforms;
@@ -48,6 +49,23 @@ internal sealed class GameMemoryServiceWrapper(
 		gameMemoryService.Scan();
 
 		return true;
+	}
+
+	/// <summary>
+	/// Explains why the ddstats block is not available, so that a refusal to read the game's memory - which on macOS
+	/// almost always means the app was not launched under sudo - is never presented to the user the same way as the
+	/// game simply not running.
+	/// </summary>
+	public string DescribeUnavailability()
+	{
+		return gameMemoryService.BlockAddressStatus switch
+		{
+			BlockAddressStatus.MemoryUnreadable =>
+				"The game's memory could not be read. On macOS, reading another program's memory requires administrator rights: quit ddinfo-tools and start it again with sudo. This only affects practice mode's live stats - the spawnset editor, asset editor, replay editor, mod manager, and custom leaderboards do not need it.",
+			BlockAddressStatus.BlockNotFound =>
+				"The game's memory was read, but holds no stats block yet. Start a run, or check that the game is a version this app knows.",
+			_ => "Devil Daggers is not running.",
+		};
 	}
 
 	private void InitializeMarker()

@@ -32,8 +32,15 @@ internal sealed class RunAnalysisWindow(GameMemoryServiceWrapper gameMemoryServi
 		ImGuiUtils.SetNextWindowMinSize(512, 1024);
 		if (ImGui.Begin("Run Analysis"))
 		{
-			_splitsChild.Render(StatsData);
-			_graphsChild.Render(StatsData);
+			if (gameMemoryService.IsInitialized)
+			{
+				_splitsChild.Render(StatsData);
+				_graphsChild.Render(StatsData);
+			}
+			else
+			{
+				ImGui.TextWrapped(Inline.Utf8(gameMemoryServiceWrapper.DescribeUnavailability()));
+			}
 		}
 
 		ImGui.End();
