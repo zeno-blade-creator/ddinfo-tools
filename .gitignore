@@ -267,3 +267,7 @@ __pycache__/
 appsettings.json
 appsettings.Development.json
 encryption.ini
+
+# /ship execution state (loop.sh) — not project source
+/specs/*
+.claude/settings.local.json

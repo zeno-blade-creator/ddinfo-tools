@@ -1,0 +1,48 @@
+{
+  "_comment": [
+    "Scoped permissions for unattended loop.sh runs in THIS repo only.",
+    "It grants exactly what an iteration needs and nothing more, so you do NOT have to",
+    "reach for PERMISSION_MODE=bypassPermissions, which approves everything including",
+    "network calls and rm -rf.",
+    "",
+    "PATCHED for the macOS port (2026-08-21):",
+    "  Bare `dotnet` on this Mac resolves to /usr/local/share/dotnet, which CANNOT see",
+    "  the .NET 10 SDK installed at ~/.dotnet. Every build command must use the absolute",
+    "  path ~/.dotnet/dotnet. Both forms are allowed below so a stray bare call still",
+    "  works, but the spec's verification array uses the absolute path deliberately.",
+    "  Full rationale: MACOS-PORT-README.md.",
+    "",
+    "Review this list. Anything you are not comfortable with an agent running",
+    "unsupervised in this directory should be deleted from it."
+  ],
+  "permissions": {
+    "allow": [
+      "Read", "Glob", "Grep",
+      "Edit", "Write", "NotebookEdit",
+      "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)",
+      "Bash(git add:*)", "Bash(git commit:*)", "Bash(git show:*)",
+      "Bash(git rev-parse:*)", "Bash(git branch:*)", "Bash(git stash:*)",
+      "Bash(git remote:*)",
+      "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)",
+      "Bash(find:*)", "Bash(mkdir:*)", "Bash(wc:*)",
+      "Bash(grep:*)", "Bash(sed:*)", "Bash(awk:*)", "Bash(file:*)",
+      "Bash(uname:*)", "Bash(sw_vers:*)", "Bash(pgrep:*)",
+      "Bash(otool:*)", "Bash(codesign:*)", "Bash(nm:*)",
+      "Bash(dotnet build:*)", "Bash(dotnet test:*)", "Bash(dotnet run:*)",
+      "Bash(~/.dotnet/dotnet:*)",
+      "Bash($HOME/.dotnet/dotnet:*)",
+      "Bash(/Users/enzomarkarian/.dotnet/dotnet:*)",
+      "Bash(make:*)"
+    ],
+    "deny": [
+      "Bash(rm -rf /*)",
+      "Bash(sudo rm:*)",
+      "Bash(git push:*)",
+      "Bash(gh repo delete:*)",
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(**/credentials*)",
+      "Read(**/*secret*)"
+    ]
+  }
+}
