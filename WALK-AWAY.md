@@ -35,6 +35,23 @@ This is where you are for everything up to and including `--check`.
 | **Close the lid** | ❌ | Mac sleeps, run freezes |
 | Ctrl-C to stop early | ✅ | Safe. Resume later by rerunning the same command |
 
+### Can I use the computer while it runs?
+
+**Yes.** It's a terminal process running `claude` and `dotnet build`. It never takes focus,
+never takes over the screen, and does not need the game running. Play games, browse, work.
+A heavy game competes for CPU and slows builds — that is the only effect, and it is not a
+correctness risk.
+
+Three exceptions:
+
+| Don't | Why |
+|---|---|
+| Close the lid | Mac sleeps, run freezes |
+| Quit or close the Terminal window running it | Kills the process |
+| **Edit any file inside this repo** | `loop.sh` fails an attempt if it finds uncommitted changes it didn't make. Saving a file mid-run can fail an otherwise-good iteration |
+
+Anywhere else on the Mac is fair game. Just treat this folder as off-limits until it's done.
+
 ---
 
 ## What "closing the lid mid-run" actually costs
@@ -73,14 +90,18 @@ hot. Not worth it to save leaving a lid open.
 ## The command
 
 ```bash
-PERMISSION_MODE=bypassPermissions ~/.claude/scripts/caffeinated --cost 15 \
-  ~/.claude/scripts/loop.sh specs/macos-port
+~/.claude/scripts/caffeinated ~/.claude/scripts/loop.sh specs/macos-port
 ```
 
-Note: this repo has a scoped `.claude/settings.json`, so `bypassPermissions` should not be
-needed — try it without that prefix first. If iterations stall asking for approval nobody
-is there to give, add it back and understand what it means: the agent runs anything
-without asking. `git push` is denied either way.
+No `--cost` ceiling: extra/overage usage is turned off at the account level, which is a
+harder stop than the script's own dollar accounting and is the guard that actually matters.
+The loop also self-limits — 50 iterations max, stops after 2 iterations that complete
+nothing, and circuit-breaks after 3 failures on one issue.
+
+This repo has a scoped `.claude/settings.json`, so `PERMISSION_MODE=bypassPermissions`
+should not be needed. If iterations stall asking for approval nobody is there to give, add
+that prefix and understand what it means: the agent runs anything without asking.
+`git push` is denied either way.
 
 ---
 
