@@ -90,7 +90,53 @@ This is the same class of bug as rule #1 in the global `CLAUDE.md` — a bare co
 resolving against an inherited `PATH`. It bites harder in unattended runs, where the
 process inherits an even thinner environment than an interactive shell.
 
-To fix it permanently for your shell (optional, does not help unattended processes):
+### The same trap bites again at runtime — `DOTNET_ROOT`
+
+Verified 2026-08-21. Building is only half of it. The **compiled binary** asks the system
+where .NET lives, is told `/usr/local/share/dotnet`, and never looks in `~/.dotnet`:
+
+```
+You must install or update .NET to run this application.
+Architecture: arm64   Framework: 'Microsoft.NETCore.App', version '10.0.0' (arm64)
+.NET location: /usr/local/share/dotnet
+The following frameworks were found:  3.1.14 … 9.0.0
+```
+
+The 10.0.11 runtime is present the whole time, at
+`~/.dotnet/shared/Microsoft.NETCore.App`. Set `DOTNET_ROOT` to point the app host at it:
+
+```bash
+DOTNET_ROOT="$HOME/.dotnet" ./src/artifacts/bin/DevilDaggersInfo.Tools/debug/ddinfo-tools
+```
+
+**`sudo` strips the environment**, so exporting it is not enough for practice mode — it
+must be restated on the command itself:
+
+```bash
+sudo DOTNET_ROOT="$HOME/.dotnet" ./src/artifacts/bin/DevilDaggersInfo.Tools/debug/ddinfo-tools
+```
+
+And never `sudo dotnet run` — that invokes the SDK as root and leaves root-owned files in
+`src/artifacts/` and `obj/`, which break every later ordinary build with permission errors
+that look nothing like their cause. Build as your user, run the binary as root.
+
+### macOS has no GL debug output
+
+Verified 2026-08-21. With the runtime found, the app got as far as creating a window and a
+GL context — confirming the forward-compatible hint works — and then died:
+
+```
+Silk.NET.Core.Loader.SymbolLoadingException: Native symbol not found (Symbol: glDebugMessageCallback)
+   at DevilDaggersInfo.Tools.Container.GetGl(...) Container.cs:line 213
+```
+
+`glDebugMessageCallback` is OpenGL 4.3 / `KHR_debug`. macOS caps at 4.1 and never exposed
+that extension, so the three `#if DEBUG` debug-output blocks in `Container.cs` are now
+`#if DEBUG && !OSX`. Debug builds on macOS simply get no GL diagnostics; Windows and Linux
+Debug builds are unaffected.
+
+To fix the build-side lookup permanently for your shell (optional, does not help
+unattended processes):
 
 ```bash
 echo 'export PATH="$HOME/.dotnet:$PATH"' >> ~/.zshrc

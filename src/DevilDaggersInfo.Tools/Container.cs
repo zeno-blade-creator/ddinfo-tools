@@ -185,7 +185,9 @@ internal sealed partial class Container : IContainer<Application>
 #endif
 		glfw.WindowHint(WindowHintBool.Focused, true);
 		glfw.WindowHint(WindowHintBool.Resizable, true);
-#if DEBUG
+#if DEBUG && !OSX
+		// Not on macOS: debug output is glDebugMessageCallback, which is OpenGL 4.3 / KHR_debug. macOS caps at 4.1 and
+		// never exposed that extension, so requesting a debug context here only sets up a symbol lookup that fails.
 		glfw.WindowHint(WindowHintBool.OpenGLDebugContext, true);
 #endif
 		glfw.CheckError();
@@ -205,7 +207,7 @@ internal sealed partial class Container : IContainer<Application>
 
 		GL gl = GL.GetApi(glfw.GetProcAddress);
 
-#if DEBUG
+#if DEBUG && !OSX
 		// A debug context is requested in GetGlfw. Without a callback installed, the driver's diagnostics are discarded,
 		// which is how spec violations end up only being noticed as visual glitches on stricter drivers.
 		gl.Enable(EnableCap.DebugOutput);
@@ -224,7 +226,7 @@ internal sealed partial class Container : IContainer<Application>
 		return gl;
 	}
 
-#if DEBUG
+#if DEBUG && !OSX
 	private static void LogGlDebugMessage(ILogger logger, GLEnum source, GLEnum type, GLEnum severity, int length, nint message)
 	{
 		string text = System.Runtime.InteropServices.Marshal.PtrToStringAnsi(message, length);
