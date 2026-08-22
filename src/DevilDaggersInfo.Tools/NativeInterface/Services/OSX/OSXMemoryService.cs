@@ -156,16 +156,7 @@ internal sealed partial class OSXMemoryService(ILogger logger) : INativeMemorySe
 			return;
 		}
 
-		ulong bytesRead = 0;
-		int kernReturn;
-		unsafe
-		{
-			fixed (byte* localBase = &bytes[offset])
-			{
-				kernReturn = MachVmReadOverwrite(task, (ulong)address, (ulong)size, (ulong)localBase, ref bytesRead);
-			}
-		}
-
+		int kernReturn = ReadInto(task, (ulong)address, bytes.AsSpan(offset, size), out ulong bytesRead);
 		if (kernReturn == _kernSuccess && bytesRead == (ulong)size)
 		{
 			_loggedReadFailure = false;
@@ -280,13 +271,7 @@ internal sealed partial class OSXMemoryService(ILogger logger) : INativeMemorySe
 				int chunkSize = (int)Math.Min((ulong)_scanChunkSize, regionSize - offset);
 				bool isLastChunk = (ulong)chunkSize == regionSize - offset;
 
-				ulong chunkBytesRead = 0;
-				int kernReturn;
-				fixed (byte* localBase = buffer)
-				{
-					kernReturn = MachVmReadOverwrite(task, regionAddress + offset, (ulong)chunkSize, (ulong)localBase, ref chunkBytesRead);
-				}
-
+				int kernReturn = ReadInto(task, regionAddress + offset, buffer.AsSpan(0, chunkSize), out ulong chunkBytesRead);
 				if (kernReturn == _kernSuccess && chunkBytesRead > 0)
 				{
 					regionRead = true;
@@ -382,16 +367,7 @@ internal sealed partial class OSXMemoryService(ILogger logger) : INativeMemorySe
 		if (!TryGetTaskPort(process, out uint task))
 			return false;
 
-		ulong bytesRead = 0;
-		int kernReturn;
-		unsafe
-		{
-			fixed (byte* localBase = _blockBuffer)
-			{
-				kernReturn = MachVmReadOverwrite(task, (ulong)address, MainBlock.Size, (ulong)localBase, ref bytesRead);
-			}
-		}
-
+		int kernReturn = ReadInto(task, (ulong)address, _blockBuffer, out ulong bytesRead);
 		return kernReturn == _kernSuccess && bytesRead == MainBlock.Size && MainBlock.IsValid(_blockBuffer);
 	}
 
@@ -532,6 +508,28 @@ internal sealed partial class OSXMemoryService(ILogger logger) : INativeMemorySe
 			logger.Error("Could not access the memory of Devil Daggers (process {ProcessId}): task_for_pid returned kern_return_t {KernReturn} ({Description}). If ddinfo-tools was not started under sudo, start it again under sudo - reading another process's memory requires root on macOS.", process.Id, kernReturn, DescribeKernReturn(kernReturn));
 
 		return false;
+	}
+
+	/// <summary>
+	/// Reads as much of the task's memory as <paramref name="destination" /> holds into it. This is the only place
+	/// that pins a buffer and calls <c>mach_vm_read_overwrite</c>; what a refusal or a short read means is the
+	/// caller's business, because it differs - a scan probing a region expects both, a block read does not.
+	/// </summary>
+	/// <returns>The <c>kern_return_t</c> the read returned.</returns>
+	private static int ReadInto(uint task, ulong address, Span<byte> destination, out ulong bytesRead)
+	{
+		ulong read = 0;
+		int kernReturn;
+		unsafe
+		{
+			fixed (byte* localBase = destination)
+			{
+				kernReturn = MachVmReadOverwrite(task, address, (ulong)destination.Length, (ulong)localBase, ref read);
+			}
+		}
+
+		bytesRead = read;
+		return kernReturn;
 	}
 
 	/// <summary>
