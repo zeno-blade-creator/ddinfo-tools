@@ -271,3 +271,7 @@ encryption.ini
 # /ship execution state (loop.sh) — not project source
 /specs/*
 .claude/settings.local.json
+
+# macOS Finder metadata — created constantly, and an untracked file can fail a loop.sh attempt
+.DS_Store
+**/.DS_Store
