@@ -4,26 +4,12 @@ using System.Runtime.InteropServices;
 
 namespace DevilDaggersInfo.Tools.NativeInterface.Services.Linux;
 
-internal sealed partial class LinuxMemoryService(ILogger logger) : INativeMemoryService
+internal sealed partial class LinuxMemoryService(ILogger logger) : MarkerOffsetMemoryService
 {
-	private readonly byte[] _pointerBuffer = new byte[sizeof(long)];
-
 	private bool _loggedReadFailure;
 	private bool _loggedWriteFailure;
 
-	public bool RequiresMarkerOffset => true;
-
-	public BlockAddressResult ResolveBlockAddress(Process process, long? ddstatsMarkerOffset)
-	{
-		if (process.MainModule == null || ddstatsMarkerOffset is not { } markerOffset)
-			return BlockAddressResult.Unresolved;
-
-		_pointerBuffer.AsSpan().Clear();
-		ReadMemory(process, process.MainModule.BaseAddress.ToInt64() + markerOffset, _pointerBuffer, 0, sizeof(long));
-		return BlockAddressResult.Resolved(BitConverter.ToInt64(_pointerBuffer));
-	}
-
-	public void WriteMemory(Process process, long address, byte[] bytes, int offset, int size)
+	public override void WriteMemory(Process process, long address, byte[] bytes, int offset, int size)
 	{
 		// Mirror ReadMemory in not turning an empty request into a pointer into an empty array.
 		if (size <= 0)
@@ -61,7 +47,7 @@ internal sealed partial class LinuxMemoryService(ILogger logger) : INativeMemory
 		}
 	}
 
-	public void ReadMemory(Process process, long address, byte[] bytes, int offset, int size)
+	public override void ReadMemory(Process process, long address, byte[] bytes, int offset, int size)
 	{
 		// Callers can request an empty read (for example when the game reports a replay length of 0), which must not
 		// be turned into a pointer into an empty array.
@@ -104,7 +90,7 @@ internal sealed partial class LinuxMemoryService(ILogger logger) : INativeMemory
 		}
 	}
 
-	public Process? GetDevilDaggersProcess()
+	public override Process? GetDevilDaggersProcess()
 	{
 		return Array.Find(Process.GetProcesses(), p => p.ProcessName.StartsWith("devildaggers"));
 	}
