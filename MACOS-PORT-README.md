@@ -18,13 +18,54 @@ evening if nobody wrote them down.
 | `DevilDaggersInfo.Tools.Engine` builds on macOS | ✅ Green today, unmodified |
 | `DevilDaggersInfo.Tools` builds on macOS | ❌ 4 errors, all from one missing `<Otherwise>` |
 | Devil Daggers installed on this Mac | ✅ Native Steam build present |
-| `task_for_pid` on the game | ⚠️ Unproven — needs `sudo`; run the probe |
-| macOS marker offset from devildaggers.info | ❌ **Does not exist. Not obtainable.** |
+| `task_for_pid` on the game | ✅ **Proven working under `sudo`** (see §3a) |
+| Mac MainBlock layout matches Windows/Linux | ✅ Proven — `FormatVersion 1`, parsed correctly |
+| macOS marker offset from devildaggers.info | ❌ Does not exist — but **no longer needed** (§4) |
+| Game process name match | ❌ Broken on macOS — `"Devil Daggers"`, not `devildaggers` |
 
-The editors, mod manager, and replay tools are a straightforward port.
-**Practice mode / live stats has a dependency you cannot satisfy alone.**
+The editors, mod manager, and replay tools are a straightforward port and need **no
+special permissions whatsoever**. Practice mode / live stats works, but only when the
+tool is launched with `sudo`.
 
 ---
+
+## 0. Which features need permissions, and which don't
+
+Worth being precise about, because "this tool needs `sudo`" is false and would scare
+people off five features that don't.
+
+| Feature | What it touches | Needs `sudo`? |
+|---|---|---|
+| Spawnset / Survival editor | Files on disk | No |
+| Asset editor | Files on disk | No |
+| Replay editor | Files on disk | No |
+| Mod manager | Renames files in the game's folder | No |
+| Custom leaderboards | Files + the network | No |
+| **Practice mode / live stats** | **Reads the running game's memory** | **Yes** |
+
+Only the last row is affected by anything in §3. Everything else is an ordinary program
+reading and writing ordinary files.
+
+### How mods work (they have nothing to do with permissions)
+
+A mod is **just a file in a folder**. The game looks in its `mods` directory and loads
+any file whose name begins with `audio` or `dd`. That is the entire mechanism.
+
+So the mod manager's whole job is renaming files:
+
+```csharp
+// ModsDirectoryLogic.cs — disabling a mod
+string newFileName = originalFileName.StartsWith("audio") || originalFileName.StartsWith("dd")
+    ? $"_{originalFileName}"          // "dd"  → "_dd"  — game ignores it
+    : originalFileName[1..];          // "_dd" → "dd"   — game loads it
+File.Move(originalPath, newPath);
+```
+
+Enabled means the name starts with `audio`/`dd`; disabled means it has a leading
+underscore. Nothing is injected into the game, nothing is patched, no process is touched.
+
+**Launch the game from Steam exactly as normal.** The tool is a separate program that
+runs alongside it — it is not a mod and does not change how the game starts.
 
 ## 1. Toolchain — the `PATH` trap
 
@@ -142,7 +183,84 @@ There is a further wrinkle worth knowing before you're surprised by it: even as 
 `get-task-allow`. Steam-distributed games are usually signed this way. The probe will tell
 you which situation you're in — that's the whole point of running it.
 
-### Running the probe
+### 3a. Probe result — verified 2026-08-21, it works
+
+Run against the live game (pid 83466), mid-run, under `sudo`:
+
+```
+euid: 0
+[1] OK — task_for_pid succeeded. Task port: 4611
+[2] OK — 1757 regions seen, 1674 read, 14,784,851,968 bytes read
+[3] OK — found '__ddstats__' at 2 addresses
+
+    Marker '__ddstats__'   FormatVersion 1   PlayerId 379339
+    PlayerName 'glorie_us'  Time 190.2310  Gems 83  Kills 274
+```
+
+Three things this settles permanently:
+
+1. **macOS permits `task_for_pid` + `mach_vm_read_overwrite` under `sudo`.** No
+   entitlement needed for local use. The entitlement only matters for shipping a signed
+   `.app` to other people — already out of scope.
+2. **The Mac build's `MainBlock` layout is identical to Windows and Linux.**
+   `FormatVersion 1`, every field in the right place. `MainBlock.cs` needs no changes and
+   no offsets need re-deriving.
+3. **Scanning finds the block, so the server dependency in §4 is optional, not fatal.**
+   Pointers to the block were located at `0x10224F868` and `0x102251E78`.
+
+### Why Windows and Linux need none of this
+
+The three platforms simply disagree about who may look inside a running program.
+
+- **Windows** — reading another process's memory *as the same user* is an ordinary
+  permission. `OpenProcess` with `PROCESS_VM_READ` succeeds with no elevation.
+- **Linux** — `process_vm_readv` also works same-user, but many distributions ship the
+  Yama `ptrace_scope` safety catch, which can refuse it. The Linux service already logs a
+  specific hint about this on `EPERM`. So Linux isn't free either; the difference is that
+  the user can change the setting themselves.
+- **macOS** — Apple classifies reading another process's memory as *debugging*, and
+  debugging is off by default, even for processes you own. This is deliberate: it's
+  exactly the mechanism you'd use to lift passwords or session tokens out of a running
+  app. There is no user-facing setting to relax it. Root or entitlement, nothing else.
+
+**Do not "fix" this with a passwordless `sudoers` entry.** It edits your Mac's core
+security configuration to save a password prompt, and a syntax error in that file can
+lock you out of administrator access on your own machine. Bad trade. Use the
+double-clickable launcher below instead.
+
+### The double-clickable launcher
+
+`~/Claude/Projects/ddmac-probe/Run Probe.command` — double-click it in Finder.
+
+A `.command` file opens Terminal and runs itself, which is exactly what's needed here:
+`sudo` must have a real terminal to prompt for a password. A normal `.app` double-click
+has nowhere to ask, so it would fail silently — the same silent-failure trap described in
+§3b below.
+
+The launcher checks the game is running *before* asking for a password, explains why the
+password is needed, runs the probe, and translates the exit code into a sentence.
+
+### 3b. The process-name bug
+
+Found while getting the probe to start, and it is a real defect in the port:
+
+```csharp
+// LinuxMemoryService.GetDevilDaggersProcess()
+Array.Find(Process.GetProcesses(), p => p.ProcessName.StartsWith("devildaggers"));
+```
+
+On macOS the process is named **`Devil Daggers`** — capital letters and a space:
+
+```
+/Users/…/steamapps/common/devildaggers/Devil Daggers.app/Contents/MacOS/Devil Daggers
+```
+
+That match can never succeed, and it fails **silently**: `GetDevilDaggersProcess()`
+returns `null`, `Initialize()` sets `IsInitialized = false`, and the UI simply shows no
+game connected. No exception, no log line, nothing to grep for. `OSXMemoryService` must
+normalise the name (lowercase and strip spaces before comparing).
+
+### Running the probe manually
 
 The probe lives **outside this repo** at `~/Claude/Projects/ddmac-probe` so it never
 pollutes the fork. It is read-only: it never writes to the game and never writes a file.
@@ -207,12 +325,15 @@ to point at.
 **Three ways out, in ascending order of effort:**
 
 1. **Derive the offset locally and hardcode it behind `OSXValues`.** The probe already
-   does the hard half — it finds the block by scanning and then locates the pointer to it.
-   Fine for your own machine. Brittle: it breaks on every game update.
-2. **Scan instead of fetch, on macOS only.** Search the address space for `__ddstats__`
-   directly and skip the offset entirely. More robust across game updates and removes the
-   server dependency, but it's a genuine behavioural divergence from the other two
-   platforms and would need Noah's buy-in to upstream.
+   does the hard half — it finds the block by scanning and then locates the pointer to it
+   (`0x10224F868`, `0x102251E78`). Fine for your own machine. Brittle: it breaks on every
+   game update.
+2. **Scan instead of fetch, on macOS only.** ← *proven working, 2026-08-21.* Search the
+   address space for `__ddstats__` directly and skip the offset entirely. The probe did
+   exactly this and parsed a correct `MainBlock` out of the result. More robust across
+   game updates and removes the server dependency; the cost is a genuine behavioural
+   divergence from the other two platforms, which would need Noah's buy-in to upstream.
+   **This is the recommended path.**
 3. **Get macOS added upstream** — a `MacOs` enum member, a server route, and an offset
    Noah derives from the Mac binary. The right long-term answer, entirely outside your
    control, and not something to block on.
