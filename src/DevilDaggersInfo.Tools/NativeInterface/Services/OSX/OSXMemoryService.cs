@@ -94,11 +94,42 @@ internal sealed partial class OSXMemoryService(ILogger logger) : INativeMemorySe
 
 	public void WriteMemory(Process process, long address, byte[] bytes, int offset, int size)
 	{
+		// Mirror ReadMemory in not turning an empty request into a pointer into an empty array.
+		if (size <= 0)
+			return;
+
+		// A failure here has already been logged by TryGetTaskPort itself.
+		if (!TryGetTaskPort(process, out uint task))
+			return;
+
+		int kernReturn;
+		unsafe
+		{
+			fixed (byte* localBase = &bytes[offset])
+			{
+				kernReturn = MachVmWrite(task, (ulong)address, (ulong)localBase, (uint)size);
+			}
+		}
+
+		if (kernReturn == _kernSuccess)
+		{
+			_loggedWriteFailure = false;
+			return;
+		}
+
+		if (kernReturn == _kernInvalidArgument)
+		{
+			// The task port itself is no longer valid - the game most likely exited. Drop it so the next write
+			// re-acquires one instead of failing forever against a dead port.
+			_taskPort = 0;
+			_taskPortProcessId = 0;
+		}
+
 		if (_loggedWriteFailure)
 			return;
 
 		_loggedWriteFailure = true;
-		logger.Error("Could not write game memory: macOS memory writing is not implemented yet.");
+		logger.Error("Could not write game memory: mach_vm_write returned kern_return_t {KernReturn} ({Description}) writing {Size} bytes at 0x{Address:X8}. Quit ddinfo-tools and start it again under sudo - writing another process's memory requires root on macOS.", kernReturn, DescribeKernReturn(kernReturn), size, address);
 	}
 
 	public void ReadMemory(Process process, long address, byte[] bytes, int offset, int size)
@@ -561,6 +592,10 @@ internal sealed partial class OSXMemoryService(ILogger logger) : INativeMemorySe
 	[LibraryImport("libc", EntryPoint = "mach_vm_read_overwrite")]
 	[DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
 	private static partial int MachVmReadOverwrite(uint task, ulong address, ulong size, ulong data, ref ulong outSize);
+
+	[LibraryImport("libc", EntryPoint = "mach_vm_write")]
+	[DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
+	private static partial int MachVmWrite(uint task, ulong address, ulong data, uint dataCount);
 
 	[LibraryImport("libc", EntryPoint = "mach_vm_region")]
 	[DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
