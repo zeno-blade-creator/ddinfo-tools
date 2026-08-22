@@ -472,7 +472,46 @@ check on the ticket that fixes it, and can be promoted to spec level once it's g
 
 ## 7a. Known issues — follow-up work
 
-### Crash when a run ends (open, needs one reproduction)
+### Crash when hovering a Run Analysis graph — FIXED, and it was never a macOS bug
+
+Diagnosed 2026-08-22 by capturing stderr. **The memory-corruption theory below was wrong**
+and is kept only as a record of how the diagnosis went. The real cause:
+
+```
+Assertion failed: ErrorCheckUsingSetCursorPosToExtendParentBoundaries, imgui.cpp:11253
+In window '##Tooltip_00': Code uses SetCursorPos()/SetCursorScreenPos() to extend
+window/parent boundaries. Please submit an item e.g. Dummy() afterwards.
+   at ImGui::EndTooltip()
+```
+
+`GraphsChild.AddTooltipText` right-aligned its second column by moving the cursor, drawing
+the text, and then moving the cursor **back** — with nothing submitted afterwards. Dear
+ImGui 1.92 asserts on that inside `EndTooltip`, because it cannot tell whether the tooltip
+should grow to cover a position nothing was drawn at. `IM_ASSERT` calls `abort()`, hence
+`SIGABRT`.
+
+It fires only while the mouse is inside a graph rectangle (`GraphsChild.cs:141` and `:174`
+are hover tooltips), which is why it looked intermittent and run-length-dependent. It is
+not.
+
+**This is not a macOS bug.** `GraphsChild.cs` is shared UI with no `#if` anywhere near it;
+the same assert fires on Windows and Linux. The trigger is upstream commit `156fd51`
+"Migrate from ImGui.NET to Hexa.NET.ImGui" (2026-08-15), which took Dear ImGui 1.91 → 1.92
+and added this validation — an ancestor of the commit this port branched from. The port
+changed **no** dependency versions; `Hexa.NET.ImGui` is pinned at 2.2.9 in
+`Directory.Packages.props` and was never touched. Worth reporting upstream separately.
+
+Fixed by right-aligning through `SameLine(offset)`, which never leaves a dangling cursor
+move. The trailing reset was redundant — `Text()` already returns the cursor to the start
+of the next line.
+
+**Audited for recurrence:** every other `ImGui.SetCursorPos*` call site in `Ui/` is
+immediately followed by an item submission (`Text`, `TextColored`, `Button`, `Title`).
+`GraphsChild.cs:249` was the only place where a cursor move was the last statement in its
+block. The other `BeginTooltip`/`EndTooltip` pair, in `ReplayTimelineChild.cs:197`, ends
+on `EndTable()` and is safe.
+
+### The superseded hypothesis (kept as a record)
 
 Observed 2026-08-22 14:16 under `sudo`, with live Run Analysis working correctly. The app
 died with `SIGABRT` (Abort trap: 6) the moment the in-game run ended. `SIGABRT` from a .NET
