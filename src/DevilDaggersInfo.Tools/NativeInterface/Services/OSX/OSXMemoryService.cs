@@ -1,3 +1,4 @@
+using DevilDaggersInfo.Tools.GameMemory;
 using Serilog;
 using System.Diagnostics;
 using System.Globalization;
@@ -15,10 +16,34 @@ internal sealed partial class OSXMemoryService(ILogger logger) : INativeMemorySe
 	private const int _vmRegionBasicInfo64 = 9;
 	private const int _vmRegionBasicInfoCount64 = 9;
 
+	// Regions are read in chunks rather than whole, because a single region can be gigabytes wide.
+	private const int _scanChunkSize = 4 * 1024 * 1024;
+
+	// A full scan reads gigabytes and takes seconds, and it runs from the ~300 Hz render loop, so a scan that came up
+	// empty must not be retried on the next frame.
+	private const long _rescanCooldownMs = 5000;
+
+	private readonly byte[] _blockBuffer = new byte[MainBlock.Size];
+
 	private bool _loggedWriteFailure;
 	private bool _loggedReadFailure;
 	private bool _loggedProcessLookupFailure;
 	private bool _loggedTaskFailure;
+	private bool _loggedScanUnreadable;
+	private bool _loggedScanNotFound;
+
+	// The scan buffer is kept between scans rather than reallocated; it is large enough to land on the large object
+	// heap. Null until the first scan, so a session that never scans never pays for it.
+	private byte[]? _scanBuffer;
+
+	// The address the ddstats block was last found at, alongside the pid it was found in. 0 means nothing is cached.
+	private long _blockAddress;
+	private int _blockAddressProcessId;
+
+	// Environment.TickCount64 before which no new scan may start, and the status the last scan ended on, which is what
+	// callers get while the cooldown holds.
+	private long _nextScanTimestamp;
+	private BlockAddressStatus _lastScanStatus;
 
 	// task_for_pid is privileged and comparatively expensive, so the port is acquired once and kept for as long as it
 	// belongs to the process we are asked about. _taskPort is 0 when nothing is cached.
@@ -28,6 +53,44 @@ internal sealed partial class OSXMemoryService(ILogger logger) : INativeMemorySe
 	// Our own task port, resolved once. 0 means nothing resolved yet.
 	private uint _selfTaskPort;
 	private bool _loggedSelfTaskFailure;
+
+	/// <summary>
+	/// macOS has no marker offset to fetch. The DevilDaggers.info API serves one for Windows and one for Linux, and
+	/// <c>AppOperatingSystem</c> has no third member to ask with, so the block is found by searching for it instead.
+	/// </summary>
+	public bool RequiresMarkerOffset => false;
+
+	/// <inheritdoc />
+	public BlockAddressResult ResolveBlockAddress(Process process, long? ddstatsMarkerOffset)
+	{
+		// The block does not move while the game runs, so an address found once is reused until it stops reading back
+		// as a block - which is what a restart, a different build, or the game freeing it all look like from here.
+		if (_blockAddress != 0 && _blockAddressProcessId == process.Id && IsBlockAt(process, _blockAddress))
+			return BlockAddressResult.Resolved(_blockAddress);
+
+		if (_blockAddress != 0)
+		{
+			_blockAddress = 0;
+			_blockAddressProcessId = 0;
+
+			// The cached address has stopped reading back as a block. Until a scan says otherwise the honest answer is
+			// that there is no block, rather than the outcome of the scan that found the one which has since gone.
+			_lastScanStatus = BlockAddressStatus.BlockNotFound;
+		}
+
+		if (Environment.TickCount64 < _nextScanTimestamp)
+			return new BlockAddressResult(_lastScanStatus, 0);
+
+		_lastScanStatus = ScanForBlock(process, out long scannedAddress);
+		_nextScanTimestamp = Environment.TickCount64 + _rescanCooldownMs;
+
+		if (_lastScanStatus != BlockAddressStatus.Resolved)
+			return new BlockAddressResult(_lastScanStatus, 0);
+
+		_blockAddress = scannedAddress;
+		_blockAddressProcessId = process.Id;
+		return BlockAddressResult.Resolved(scannedAddress);
+	}
 
 	public void WriteMemory(Process process, long address, byte[] bytes, int offset, int size)
 	{
@@ -44,6 +107,15 @@ internal sealed partial class OSXMemoryService(ILogger logger) : INativeMemorySe
 		// be turned into a pointer into an empty array.
 		if (size <= 0)
 			return;
+
+		// Callers keep scanning after the block address failed to resolve, and the game leaves the stats and replay
+		// pointers null outside a run, so a read of address 0 is routine and is not a fault worth reporting. Why the
+		// address is unknown has already been logged by ResolveBlockAddress.
+		if (address == 0)
+		{
+			Array.Clear(bytes, offset, size);
+			return;
+		}
 
 		if (!TryGetTaskPort(process, out uint task))
 		{
@@ -118,6 +190,178 @@ internal sealed partial class OSXMemoryService(ILogger logger) : INativeMemorySe
 	private static string Normalize(string processName)
 	{
 		return processName.Replace(" ", string.Empty, StringComparison.Ordinal).ToLowerInvariant();
+	}
+
+	/// <summary>
+	/// Walks every readable region of the game's address space looking for the ddstats block.
+	/// </summary>
+	/// <returns>
+	/// <see cref="BlockAddressStatus.Resolved" />, having set <paramref name="blockAddress" />, or the reason the block
+	/// could not be found. A scan that could not read a single byte is a permissions problem and is reported separately
+	/// from a scan that read the whole address space and found no block in it.
+	/// </returns>
+	private unsafe BlockAddressStatus ScanForBlock(Process process, out long blockAddress)
+	{
+		blockAddress = 0;
+
+		// TryGetTaskPort logs the sudo advice for us when this fails.
+		if (!TryGetTaskPort(process, out uint task))
+			return BlockAddressStatus.MemoryUnreadable;
+
+		byte[] buffer = _scanBuffer ??= new byte[_scanChunkSize];
+		int markerLength = MainBlock.MarkerBytes.Length;
+
+		ulong regionAddress = 0;
+		ulong bytesRead = 0;
+		int regionsSeen = 0;
+		int regionsRead = 0;
+
+		// Hoisted out of the loop: stack allocations are not released until the method returns, and the walk runs to
+		// thousands of iterations.
+		int* info = stackalloc int[_vmRegionBasicInfoCount64];
+
+		while (true)
+		{
+			ulong regionSize = 0;
+			int infoCount = _vmRegionBasicInfoCount64;
+
+			// Walked off the top of the address space.
+			if (MachVmRegion(task, ref regionAddress, ref regionSize, _vmRegionBasicInfo64, info, ref infoCount, out _) != _kernSuccess)
+				break;
+
+			regionsSeen++;
+
+			// A zero-width region would leave the walk asking about the same address forever.
+			if (regionSize == 0)
+				break;
+
+			// The first field of vm_region_basic_info_64 is the current protection.
+			if ((info[0] & _vmProtRead) == 0)
+			{
+				regionAddress += regionSize;
+				continue;
+			}
+
+			bool regionRead = false;
+			ulong offset = 0;
+			while (offset < regionSize)
+			{
+				int chunkSize = (int)Math.Min((ulong)_scanChunkSize, regionSize - offset);
+				bool isLastChunk = (ulong)chunkSize == regionSize - offset;
+
+				ulong chunkBytesRead = 0;
+				int kernReturn;
+				fixed (byte* localBase = buffer)
+				{
+					kernReturn = MachVmReadOverwrite(task, regionAddress + offset, (ulong)chunkSize, (ulong)localBase, ref chunkBytesRead);
+				}
+
+				if (kernReturn == _kernSuccess && chunkBytesRead > 0)
+				{
+					regionRead = true;
+					bytesRead += chunkBytesRead;
+
+					long found = FindBlock(process, buffer.AsSpan(0, (int)chunkBytesRead), (long)(regionAddress + offset));
+					if (found != 0)
+					{
+						_loggedScanUnreadable = false;
+						_loggedScanNotFound = false;
+						logger.Information("Found the ddstats block at 0x{BlockAddress:X8} in Devil Daggers (process {ProcessId}), after reading {MegabytesRead} MB across {RegionsSeen} memory regions.", found, process.Id, bytesRead / (1024 * 1024), regionsSeen);
+
+						blockAddress = found;
+						return BlockAddressStatus.Resolved;
+					}
+				}
+
+				if (isLastChunk)
+					break;
+
+				// Overlap the next chunk by the marker length so a marker straddling the boundary is still found. This
+				// branch only runs on a full-size chunk, so it always moves forward.
+				offset += (ulong)chunkSize - (ulong)(markerLength - 1);
+			}
+
+			if (regionRead)
+				regionsRead++;
+
+			regionAddress += regionSize;
+		}
+
+		if (bytesRead == 0)
+		{
+			_loggedScanNotFound = false;
+			if (!_loggedScanUnreadable)
+			{
+				_loggedScanUnreadable = true;
+				logger.Error("Could not read the memory of Devil Daggers (process {ProcessId}): a task port was acquired, but all {RegionsSeen} of its memory regions refused to be read. Quit ddinfo-tools and start it again under sudo.", process.Id, regionsSeen);
+			}
+
+			return BlockAddressStatus.MemoryUnreadable;
+		}
+
+		_loggedScanUnreadable = false;
+		if (!_loggedScanNotFound)
+		{
+			_loggedScanNotFound = true;
+			logger.Error("Read {MegabytesRead} MB across {RegionsRead} of {RegionsSeen} memory regions of Devil Daggers (process {ProcessId}), but found no ddstats block in it. Reading the game's memory works, so this is not a permissions problem: the game either has not created the block yet, or is a build whose layout this app does not know. Retrying every {RescanCooldownSeconds} seconds.", bytesRead / (1024 * 1024), regionsRead, regionsSeen, process.Id, _rescanCooldownMs / 1000);
+		}
+
+		return BlockAddressStatus.BlockNotFound;
+	}
+
+	/// <summary>
+	/// Searches one chunk of the game's memory for the ddstats block, rejecting the copies of the marker that are not
+	/// one - the game's own string literal, for instance.
+	/// </summary>
+	/// <returns>The address of the block, or 0 when this chunk holds none.</returns>
+	private long FindBlock(Process process, ReadOnlySpan<byte> chunk, long chunkAddress)
+	{
+		ReadOnlySpan<byte> marker = MainBlock.MarkerBytes;
+
+		int searchFrom = 0;
+		while (searchFrom <= chunk.Length - marker.Length)
+		{
+			int index = chunk[searchFrom..].IndexOf(marker);
+			if (index < 0)
+				return 0;
+
+			index += searchFrom;
+
+			long candidate = chunkAddress + index;
+			if (IsBlockAt(process, candidate))
+				return candidate;
+
+			searchFrom = index + 1;
+		}
+
+		return 0;
+	}
+
+	/// <summary>
+	/// Reads the block at <paramref name="address" /> and checks that it is one, both to reject false hits during a
+	/// scan and to confirm a cached address still holds the block.
+	/// </summary>
+	/// <remarks>
+	/// This deliberately does not go through <see cref="ReadMemory" />: a candidate that turns out not to be a block,
+	/// or a block that has gone away because the game exited, is an expected answer rather than a failure worth
+	/// logging.
+	/// </remarks>
+	private bool IsBlockAt(Process process, long address)
+	{
+		if (!TryGetTaskPort(process, out uint task))
+			return false;
+
+		ulong bytesRead = 0;
+		int kernReturn;
+		unsafe
+		{
+			fixed (byte* localBase = _blockBuffer)
+			{
+				kernReturn = MachVmReadOverwrite(task, (ulong)address, MainBlock.Size, (ulong)localBase, ref bytesRead);
+			}
+		}
+
+		return kernReturn == _kernSuccess && bytesRead == MainBlock.Size && MainBlock.IsValid(_blockBuffer);
 	}
 
 	/// <summary>

@@ -19,11 +19,21 @@ internal sealed class GameMemoryServiceWrapper(
 	public long? Marker { get; private set; }
 
 	/// <summary>
-	/// Scans game memory. If the marker is not known, fires the call to retrieve it, then returns false because memory can't be scanned until the HTTP call has returned successfully.
+	/// Scans game memory. On platforms that need the marker offset from the API, and where it is not known yet, fires the call to retrieve it and then returns false, because memory can't be scanned until the HTTP call has returned successfully.
 	/// </summary>
-	/// <returns>Whether the marker is known.</returns>
+	/// <returns>Whether memory could be scanned. Always true on platforms that have no marker offset to wait for; use <see cref="GameMemory.GameMemoryService.BlockAddressStatus" /> to find out how the scan itself went.</returns>
 	public bool Scan()
 	{
+		// Not every platform locates the block by reading a pointer at an offset the API supplies; the ones that search
+		// the game's memory for it have nothing to download and nothing to wait for.
+		if (!gameMemoryService.RequiresMarkerOffset)
+		{
+			gameMemoryService.Initialize(null);
+			gameMemoryService.Scan();
+
+			return true;
+		}
+
 		if (!Marker.HasValue)
 		{
 			if (!_tryDownloadMarker)

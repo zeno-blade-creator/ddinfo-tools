@@ -5,6 +5,20 @@ namespace DevilDaggersInfo.Tools.NativeInterface.Services.Windows;
 
 internal sealed class WindowsMemoryService : INativeMemoryService
 {
+	private readonly byte[] _pointerBuffer = new byte[sizeof(long)];
+
+	public bool RequiresMarkerOffset => true;
+
+	public BlockAddressResult ResolveBlockAddress(Process process, long? ddstatsMarkerOffset)
+	{
+		if (process.MainModule == null || ddstatsMarkerOffset is not { } markerOffset)
+			return BlockAddressResult.Unresolved;
+
+		_pointerBuffer.AsSpan().Clear();
+		ReadMemory(process, process.MainModule.BaseAddress.ToInt64() + markerOffset, _pointerBuffer, 0, sizeof(long));
+		return BlockAddressResult.Resolved(BitConverter.ToInt64(_pointerBuffer));
+	}
+
 	public Process? GetDevilDaggersProcess()
 	{
 		Process[] ddProcesses = Process.GetProcessesByName("dd");
