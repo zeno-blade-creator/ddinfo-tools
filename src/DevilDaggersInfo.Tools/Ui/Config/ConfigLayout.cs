@@ -15,6 +15,8 @@ internal sealed class ConfigLayout(GameInstallationValidator gameInstallationVal
 		const string examplePath = "/home/{USERNAME}/.local/share/Steam/steamapps/common/devildaggers/";
 #elif WINDOWS
 		const string examplePath = """C:\Program Files (x86)\Steam\steamapps\common\devildaggers""";
+#elif OSX
+		const string examplePath = "/Users/{USERNAME}/Library/Application Support/Steam/steamapps/common/devildaggers/";
 #endif
 #pragma warning restore S1075
 

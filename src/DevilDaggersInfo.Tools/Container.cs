@@ -346,6 +346,8 @@ internal sealed partial class Container : IContainer<Application>
 		return new GameMemoryService(new NativeInterface.Services.Windows.WindowsMemoryService());
 #elif LINUX
 		return new GameMemoryService(new NativeInterface.Services.Linux.LinuxMemoryService(logger));
+#elif OSX
+		return new GameMemoryService(new NativeInterface.Services.OSX.OSXMemoryService(logger));
 #endif
 	}
 
@@ -356,6 +358,8 @@ internal sealed partial class Container : IContainer<Application>
 		return new GameWindowService(new NativeInterface.Services.Windows.WindowsWindowingService());
 #elif LINUX
 		return new GameWindowService(new NativeInterface.Services.Linux.LinuxWindowingService());
+#elif OSX
+		return new GameWindowService(new NativeInterface.Services.OSX.OSXWindowingService());
 #endif
 	}
 
@@ -368,6 +372,8 @@ internal sealed partial class Container : IContainer<Application>
 		return new WindowsValues();
 #elif LINUX
 		return new LinuxValues();
+#elif OSX
+		return new OSXValues();
 #endif
 	}
 }
