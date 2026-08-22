@@ -222,7 +222,7 @@ internal sealed partial class OSXMemoryService(ILogger logger) : INativeMemorySe
 	/// could not be found. A scan that could not read a single byte is a permissions problem and is reported separately
 	/// from a scan that read the whole address space and found no block in it.
 	/// </returns>
-	private unsafe BlockAddressStatus ScanForBlock(Process process, out long blockAddress)
+	private BlockAddressStatus ScanForBlock(Process process, out long blockAddress)
 	{
 		blockAddress = 0;
 
@@ -238,17 +238,10 @@ internal sealed partial class OSXMemoryService(ILogger logger) : INativeMemorySe
 		int regionsSeen = 0;
 		int regionsRead = 0;
 
-		// Hoisted out of the loop: stack allocations are not released until the method returns, and the walk runs to
-		// thousands of iterations.
-		int* info = stackalloc int[_vmRegionBasicInfoCount64];
-
 		while (true)
 		{
-			ulong regionSize = 0;
-			int infoCount = _vmRegionBasicInfoCount64;
-
 			// Walked off the top of the address space.
-			if (MachVmRegion(task, ref regionAddress, ref regionSize, _vmRegionBasicInfo64, info, ref infoCount, out _) != _kernSuccess)
+			if (!TryGetRegion(task, ref regionAddress, out ulong regionSize, out int protection))
 				break;
 
 			regionsSeen++;
@@ -257,8 +250,7 @@ internal sealed partial class OSXMemoryService(ILogger logger) : INativeMemorySe
 			if (regionSize == 0)
 				break;
 
-			// The first field of vm_region_basic_info_64 is the current protection.
-			if ((info[0] & _vmProtRead) == 0)
+			if ((protection & _vmProtRead) == 0)
 			{
 				regionAddress += regionSize;
 				continue;
@@ -539,6 +531,30 @@ internal sealed partial class OSXMemoryService(ILogger logger) : INativeMemorySe
 	private static string DescribeRegion(uint task, ulong address)
 	{
 		ulong regionAddress = address;
+		if (!TryGetRegion(task, ref regionAddress, out _, out int protection))
+			return "The address lies above every mapped region in the process.";
+
+		// mach_vm_region reports the first region at or above the requested address, so a higher start address means
+		// the requested address is not mapped at all.
+		if (regionAddress > address)
+			return string.Create(CultureInfo.InvariantCulture, $"The address is not mapped; the nearest mapping starts at 0x{regionAddress:X8}.");
+
+		return (protection & _vmProtRead) == 0
+			? string.Create(CultureInfo.InvariantCulture, $"The address lies in an unreadable region at 0x{regionAddress:X8} (protection 0x{protection:X}).")
+			: string.Create(CultureInfo.InvariantCulture, $"The address lies in a readable region at 0x{regionAddress:X8} (protection 0x{protection:X}), so the read itself was refused.");
+	}
+
+	/// <summary>
+	/// Looks up the first region the task has mapped at or above <paramref name="address" />, which
+	/// <c>mach_vm_region</c> reports by moving <paramref name="address" /> to the start of the region it found. This
+	/// is the only place that stack-allocates the info block and knows which of its fields holds the protection.
+	/// </summary>
+	/// <returns>
+	/// Whether a region was found. False means the address is above everything the process has mapped, which is how
+	/// a walk of the whole address space reaches its end.
+	/// </returns>
+	private static bool TryGetRegion(uint task, ref ulong address, out ulong size, out int protection)
+	{
 		ulong regionSize = 0;
 		int infoCount = _vmRegionBasicInfoCount64;
 
@@ -546,22 +562,14 @@ internal sealed partial class OSXMemoryService(ILogger logger) : INativeMemorySe
 		unsafe
 		{
 			int* info = stackalloc int[_vmRegionBasicInfoCount64];
-			kernReturn = MachVmRegion(task, ref regionAddress, ref regionSize, _vmRegionBasicInfo64, info, ref infoCount, out _);
-
-			if (kernReturn != _kernSuccess)
-				return "The address lies above every mapped region in the process.";
-
-			// mach_vm_region reports the first region at or above the requested address, so a higher start address
-			// means the requested address is not mapped at all.
-			if (regionAddress > address)
-				return string.Create(CultureInfo.InvariantCulture, $"The address is not mapped; the nearest mapping starts at 0x{regionAddress:X8}.");
+			kernReturn = MachVmRegion(task, ref address, ref regionSize, _vmRegionBasicInfo64, info, ref infoCount, out _);
 
 			// The first field of vm_region_basic_info_64 is the current protection.
-			int protection = info[0];
-			return (protection & _vmProtRead) == 0
-				? string.Create(CultureInfo.InvariantCulture, $"The address lies in an unreadable region at 0x{regionAddress:X8} (protection 0x{protection:X}).")
-				: string.Create(CultureInfo.InvariantCulture, $"The address lies in a readable region at 0x{regionAddress:X8} (protection 0x{protection:X}), so the read itself was refused.");
+			protection = kernReturn == _kernSuccess ? info[0] : 0;
 		}
+
+		size = regionSize;
+		return kernReturn == _kernSuccess;
 	}
 
 	private static string DescribeKernReturn(int kernReturn)
