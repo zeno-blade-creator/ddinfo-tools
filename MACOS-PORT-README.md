@@ -470,6 +470,71 @@ check on the ticket that fixes it, and can be promoted to spec level once it's g
 
 ---
 
+## 7a. Known issues — follow-up work
+
+### Crash when a run ends (open, needs one reproduction)
+
+Observed 2026-08-22 14:16 under `sudo`, with live Run Analysis working correctly. The app
+died with `SIGABRT` (Abort trap: 6) the moment the in-game run ended. `SIGABRT` from a .NET
+process means an **unhandled managed exception**; the message goes to stderr and never
+reaches Serilog, which is why `~/ddinfo-0.13.7.1.log` ends cleanly at:
+
+```
+14:14:21 [INF] Found the ddstats block at 0x30A0011D0 in Devil Daggers (process 36486),
+               after reading 624 MB across 1189 memory regions.
+```
+
+Crash report: `~/Library/Logs/DiagnosticReports/ddinfo-tools-2026-08-22-141603.ips`.
+
+**To fix this, someone must first capture the stderr**, which is the one thing not
+recorded anywhere:
+
+```bash
+cd ~/Claude/Projects/ddinfo-tools
+sudo DOTNET_ROOT="$HOME/.dotnet" \
+  ./src/artifacts/bin/DevilDaggersInfo.Tools/debug/ddinfo-tools 2>&1 | tee ~/ddinfo-crash.txt
+```
+
+Then start a run, die, and read `~/ddinfo-crash.txt`.
+
+**Leading hypothesis**, to be confirmed or discarded against that output —
+`GameMemoryService.GetStatsBuffer()`:
+
+```csharp
+byte[] buffer = new byte[StatsBufferSize * MainBlock.StatsCount];   // 112 * int, in int arithmetic
+```
+
+`StatsCount` is read straight out of game memory with no bound check, and this overload is
+called from `RecordingLogic.cs:200`, which runs **when a run completes** — matching the
+symptom exactly. A garbage `StatsCount` overflows `112 * StatsCount` past `int.MaxValue`
+into a negative, and `new byte[negative]` throws on the render thread.
+
+Why macOS specifically: it is the only platform whose block address is *scanned and
+cached* rather than read fresh from a game-maintained pointer. If the game moves or
+rebuilds the stats array at run end, the cached block can still pass `MainBlock.IsValid`
+(marker, format version, name terminators) while `StatsBase`/`StatsCount` have gone stale.
+Windows and Linux re-read the pointer every frame and cannot land in that state.
+
+If confirmed, the fix is small: bound-check `StatsCount` before allocating (the existing
+`IsReplayValid()` already does exactly this for `ReplayLength`, rejecting
+`<= 0 or > 30 * 1024 * 1024` — the same treatment applied to `StatsCount` would do), and
+re-scan rather than trust a cached block whose derived pointers stopped making sense.
+
+### Scan freezes the UI (open, measured)
+
+`Scan()` runs on the render thread. A cold scan measured 16 s, 46 s, 49 s and 57 s in four
+runs; the real game took 624 MB / 1189 regions and was much faster, but the worst case
+stands. Moving the scan to a background thread is the obvious follow-up.
+`OSXMemoryService` is not thread-safe today — the task-port cache, `_blockBuffer` and
+`_scanBuffer` are all plain fields.
+
+### Wrong advice for one macOS case (open, cosmetic)
+
+`ReplayEditorMenu.DescribeGameMemoryUnavailable` only consults `DescribeUnavailability()`
+for `MemoryUnreadable`; for `BlockNotFound` it falls back to "Make sure the game is
+running", which on macOS is exactly wrong — the game *is* running and its memory *was*
+read.
+
 ## 8. Explicitly out of scope
 
 Say this on day one and don't let it creep:
