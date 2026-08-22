@@ -178,6 +178,11 @@ internal sealed partial class Container : IContainer<Application>
 		glfw.WindowHint(WindowHintInt.ContextVersionMajor, 3);
 		glfw.WindowHint(WindowHintInt.ContextVersionMinor, 3);
 		glfw.WindowHint(WindowHintOpenGlProfile.OpenGlProfile, OpenGlProfile.Core);
+#if OSX
+		// macOS refuses to create a Core-profile context that is not also forward-compatible; without this hint,
+		// glfwCreateWindow silently returns null instead of a window.
+		glfw.WindowHint(WindowHintBool.OpenGLForwardCompat, true);
+#endif
 		glfw.WindowHint(WindowHintBool.Focused, true);
 		glfw.WindowHint(WindowHintBool.Resizable, true);
 #if DEBUG
@@ -270,12 +275,15 @@ internal sealed partial class Container : IContainer<Application>
 	}
 
 	[Factory(Scope.SingleInstance)]
-	private static unsafe WindowHandle* CreateWindow(Glfw glfw, GlfwInput glfwInput, UserCache userCache)
+	private static unsafe WindowHandle* CreateWindow(Glfw glfw, GlfwInput glfwInput, UserCache userCache, ILogger logger)
 	{
 		WindowHandle* window = glfw.CreateWindow(userCache.Model.WindowWidth, userCache.Model.WindowHeight, $"ddinfo tools {AssemblyUtils.EntryAssemblyVersionString}", null, null);
 		glfw.CheckError();
 		if (window == null)
+		{
+			logger.Error("Could not create window. Window pointer was null. On macOS this usually means the requested OpenGL Core-profile context was not also marked forward-compatible (WindowHintBool.OpenGLForwardCompat); see GetGlfw.");
 			throw new InvalidOperationException("Could not create window. Window pointer was null.");
+		}
 
 		glfw.SetCursorPosCallback(window, (_, x, y) => glfwInput.CursorPosCallback(x, y));
 		glfw.SetScrollCallback(window, (_, _, y) => glfwInput.MouseWheelCallback(y));
