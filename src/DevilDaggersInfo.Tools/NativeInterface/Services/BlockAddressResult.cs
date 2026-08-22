@@ -9,10 +9,6 @@ internal readonly record struct BlockAddressResult(BlockAddressStatus Status, lo
 {
 	public static BlockAddressResult Unresolved { get; } = new(BlockAddressStatus.Unresolved, 0);
 
-	public static BlockAddressResult MemoryUnreadable { get; } = new(BlockAddressStatus.MemoryUnreadable, 0);
-
-	public static BlockAddressResult BlockNotFound { get; } = new(BlockAddressStatus.BlockNotFound, 0);
-
 	public static BlockAddressResult Resolved(long address)
 	{
 		return new BlockAddressResult(BlockAddressStatus.Resolved, address);

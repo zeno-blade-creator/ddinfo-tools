@@ -12,11 +12,6 @@ internal readonly record struct MainBlock
 	/// </summary>
 	public const int Size = 319;
 
-	/// <summary>
-	/// The width of the marker field at the start of the block, including its null terminator.
-	/// </summary>
-	public const int MarkerFieldSize = 12;
-
 	private const int _formatVersionOffset = 12;
 	private const int _playerNameOffset = 20;
 	private const int _replayPlayerNameOffset = 176;
