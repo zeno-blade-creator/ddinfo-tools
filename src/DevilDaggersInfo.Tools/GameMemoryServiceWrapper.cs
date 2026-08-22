@@ -26,16 +26,8 @@ internal sealed class GameMemoryServiceWrapper(
 	public bool Scan()
 	{
 		// Not every platform locates the block by reading a pointer at an offset the API supplies; the ones that search
-		// the game's memory for it have nothing to download and nothing to wait for.
-		if (!gameMemoryService.RequiresMarkerOffset)
-		{
-			gameMemoryService.Initialize(null);
-			gameMemoryService.Scan();
-
-			return true;
-		}
-
-		if (!Marker.HasValue)
+		// the game's memory for it have nothing to download and nothing to wait for, and leave Marker null forever.
+		if (gameMemoryService.RequiresMarkerOffset && !Marker.HasValue)
 		{
 			if (!_tryDownloadMarker)
 				return false;
@@ -45,7 +37,7 @@ internal sealed class GameMemoryServiceWrapper(
 		}
 
 		// Always initialize the process, so we detach properly when the game exits.
-		gameMemoryService.Initialize(Marker.Value);
+		gameMemoryService.Initialize(Marker);
 		gameMemoryService.Scan();
 
 		return true;
