@@ -40,11 +40,19 @@ people off five features that don't.
 | Asset editor | Files on disk | No |
 | Replay editor | Files on disk | No |
 | Mod manager | Renames files in the game's folder | No |
-| Custom leaderboards | Files + the network | No |
-| **Practice mode / live stats** | **Reads the running game's memory** | **Yes** |
+| Applying practice spawnsets | Writes a generated file to `mods/survival` | No |
+| **Run Analysis (live splits/gems/homing)** | **Reads the running game's memory** | **Yes** |
+| **Custom leaderboard recording** | **Reads the running game's memory** | **Yes** |
+| **Replay inject / read from memory** | **Reads the running game's memory** | **Yes** |
 
-Only the last row is affected by anything in §3. Everything else is an ordinary program
-reading and writing ordinary files.
+Corrected 2026-08-22 after running the app: **"practice mode" is two separate things and
+only one of them needs `sudo`.** Applying a practice spawnset is pure file I/O — it
+generates a spawnset and writes it to `mods/survival`, exactly like the mod manager — and
+works fine unelevated. It is only the *live* half, Run Analysis reading the running
+process, that needs elevation. Saying "practice mode needs sudo" is wrong and scares
+people off the half that works.
+
+Only the memory-reading rows are affected by anything in §3.
 
 ### How mods work (they have nothing to do with permissions)
 
