@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Fixed the app crashing when hovering a graph in the practice tool's run analysis window, which triggered a Dear ImGui assertion about extending tooltip boundaries.
 - Fixed the splits table in the practice tool corrupting the colors of the UI rendered after it.
 - Fixed 3D meshes and textures not being reloaded when the Devil Daggers installation directory changes, which could render the dagger, skull and hand using data from the previously loaded installation.
 - Fixed tile hitboxes hiding each other instead of blending, in the 3D views.

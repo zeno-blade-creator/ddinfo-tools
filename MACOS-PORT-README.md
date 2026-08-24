@@ -40,11 +40,19 @@ people off five features that don't.
 | Asset editor | Files on disk | No |
 | Replay editor | Files on disk | No |
 | Mod manager | Renames files in the game's folder | No |
-| Custom leaderboards | Files + the network | No |
-| **Practice mode / live stats** | **Reads the running game's memory** | **Yes** |
+| Applying practice spawnsets | Writes a generated file to `mods/survival` | No |
+| **Run Analysis (live splits/gems/homing)** | **Reads the running game's memory** | **Yes** |
+| **Custom leaderboard recording** | **Reads the running game's memory** | **Yes** |
+| **Replay inject / read from memory** | **Reads the running game's memory** | **Yes** |
 
-Only the last row is affected by anything in §3. Everything else is an ordinary program
-reading and writing ordinary files.
+Corrected 2026-08-22 after running the app: **"practice mode" is two separate things and
+only one of them needs `sudo`.** Applying a practice spawnset is pure file I/O — it
+generates a spawnset and writes it to `mods/survival`, exactly like the mod manager — and
+works fine unelevated. It is only the *live* half, Run Analysis reading the running
+process, that needs elevation. Saying "practice mode needs sudo" is wrong and scares
+people off the half that works.
+
+Only the memory-reading rows are affected by anything in §3.
 
 ### How mods work (they have nothing to do with permissions)
 
@@ -90,7 +98,53 @@ This is the same class of bug as rule #1 in the global `CLAUDE.md` — a bare co
 resolving against an inherited `PATH`. It bites harder in unattended runs, where the
 process inherits an even thinner environment than an interactive shell.
 
-To fix it permanently for your shell (optional, does not help unattended processes):
+### The same trap bites again at runtime — `DOTNET_ROOT`
+
+Verified 2026-08-21. Building is only half of it. The **compiled binary** asks the system
+where .NET lives, is told `/usr/local/share/dotnet`, and never looks in `~/.dotnet`:
+
+```
+You must install or update .NET to run this application.
+Architecture: arm64   Framework: 'Microsoft.NETCore.App', version '10.0.0' (arm64)
+.NET location: /usr/local/share/dotnet
+The following frameworks were found:  3.1.14 … 9.0.0
+```
+
+The 10.0.11 runtime is present the whole time, at
+`~/.dotnet/shared/Microsoft.NETCore.App`. Set `DOTNET_ROOT` to point the app host at it:
+
+```bash
+DOTNET_ROOT="$HOME/.dotnet" ./src/artifacts/bin/DevilDaggersInfo.Tools/debug/ddinfo-tools
+```
+
+**`sudo` strips the environment**, so exporting it is not enough for practice mode — it
+must be restated on the command itself:
+
+```bash
+sudo DOTNET_ROOT="$HOME/.dotnet" ./src/artifacts/bin/DevilDaggersInfo.Tools/debug/ddinfo-tools
+```
+
+And never `sudo dotnet run` — that invokes the SDK as root and leaves root-owned files in
+`src/artifacts/` and `obj/`, which break every later ordinary build with permission errors
+that look nothing like their cause. Build as your user, run the binary as root.
+
+### macOS has no GL debug output
+
+Verified 2026-08-21. With the runtime found, the app got as far as creating a window and a
+GL context — confirming the forward-compatible hint works — and then died:
+
+```
+Silk.NET.Core.Loader.SymbolLoadingException: Native symbol not found (Symbol: glDebugMessageCallback)
+   at DevilDaggersInfo.Tools.Container.GetGl(...) Container.cs:line 213
+```
+
+`glDebugMessageCallback` is OpenGL 4.3 / `KHR_debug`. macOS caps at 4.1 and never exposed
+that extension, so the three `#if DEBUG` debug-output blocks in `Container.cs` are now
+`#if DEBUG && !OSX`. Debug builds on macOS simply get no GL diagnostics; Windows and Linux
+Debug builds are unaffected.
+
+To fix the build-side lookup permanently for your shell (optional, does not help
+unattended processes):
 
 ```bash
 echo 'export PATH="$HOME/.dotnet:$PATH"' >> ~/.zshrc
@@ -415,6 +469,119 @@ This distinction matters for the loop: spec-level `verification` commands run af
 check on the ticket that fixes it, and can be promoted to spec level once it's green.
 
 ---
+
+## 7a. Known issues — follow-up work
+
+### Crash when hovering a Run Analysis graph — FIXED, and it was never a macOS bug
+
+Diagnosed 2026-08-22 by capturing stderr. **The memory-corruption theory below was wrong**
+and is kept only as a record of how the diagnosis went. The real cause:
+
+```
+Assertion failed: ErrorCheckUsingSetCursorPosToExtendParentBoundaries, imgui.cpp:11253
+In window '##Tooltip_00': Code uses SetCursorPos()/SetCursorScreenPos() to extend
+window/parent boundaries. Please submit an item e.g. Dummy() afterwards.
+   at ImGui::EndTooltip()
+```
+
+`GraphsChild.AddTooltipText` right-aligned its second column by moving the cursor, drawing
+the text, and then moving the cursor **back** — with nothing submitted afterwards. Dear
+ImGui 1.92 asserts on that inside `EndTooltip`, because it cannot tell whether the tooltip
+should grow to cover a position nothing was drawn at. `IM_ASSERT` calls `abort()`, hence
+`SIGABRT`.
+
+It fires only while the mouse is inside a graph rectangle (`GraphsChild.cs:141` and `:174`
+are hover tooltips), which is why it looked intermittent and run-length-dependent. It is
+not.
+
+**This is not a macOS bug.** `GraphsChild.cs` is shared UI with no `#if` anywhere near it;
+the same assert fires on Windows and Linux. The trigger is upstream commit `156fd51`
+"Migrate from ImGui.NET to Hexa.NET.ImGui" (2026-08-15), which took Dear ImGui 1.91 → 1.92
+and added this validation — an ancestor of the commit this port branched from. The port
+changed **no** dependency versions; `Hexa.NET.ImGui` is pinned at 2.2.9 in
+`Directory.Packages.props` and was never touched. Worth reporting upstream separately.
+
+Fixed by right-aligning through `SameLine(offset)`, which never leaves a dangling cursor
+move. The trailing reset was redundant — `Text()` already returns the cursor to the start
+of the next line.
+
+**Audited for recurrence:** every other `ImGui.SetCursorPos*` call site in `Ui/` is
+immediately followed by an item submission (`Text`, `TextColored`, `Button`, `Title`).
+`GraphsChild.cs:249` was the only place where a cursor move was the last statement in its
+block. The other `BeginTooltip`/`EndTooltip` pair, in `ReplayTimelineChild.cs:197`, ends
+on `EndTable()` and is safe.
+
+### The superseded hypothesis (kept as a record)
+
+Observed 2026-08-22 14:16 under `sudo`, with live Run Analysis working correctly. The app
+died with `SIGABRT` (Abort trap: 6) the moment the in-game run ended. `SIGABRT` from a .NET
+process means an **unhandled managed exception**; the message goes to stderr and never
+reaches Serilog, which is why `~/ddinfo-0.13.7.1.log` ends cleanly at:
+
+```
+14:14:21 [INF] Found the ddstats block at 0x30A0011D0 in Devil Daggers (process 36486),
+               after reading 624 MB across 1189 memory regions.
+```
+
+Crash report: `~/Library/Logs/DiagnosticReports/ddinfo-tools-2026-08-22-141603.ips`.
+
+**To fix this, someone must first capture the stderr**, which is the one thing not
+recorded anywhere:
+
+```bash
+cd ~/Claude/Projects/ddinfo-tools
+sudo DOTNET_ROOT="$HOME/.dotnet" \
+  ./src/artifacts/bin/DevilDaggersInfo.Tools/debug/ddinfo-tools 2>&1 | tee ~/ddinfo-crash.txt
+```
+
+Then start a run, die, and read `~/ddinfo-crash.txt`.
+
+**Leading hypothesis**, to be confirmed or discarded against that output —
+`PracticeStatsData.Populate`, the Run Analysis code path:
+
+```csharp
+private readonly byte[] _statsBuffer = new byte[StatsBufferSize * 60 * 60];  // FIXED: 3600 entries
+...
+for (int i = 0; i < gameMemoryService.MainBlock.StatsCount; i++)  // BOUND: read from game memory
+{
+    int gemsCollected = br.ReadInt32();                            // runs off the end → throws
+```
+
+The buffer is a fixed 3,600 entries; the loop bound is `StatsCount`, read out of game
+memory with no check. A `StatsCount` above 3,600 walks the `BinaryReader` past the end of
+the `MemoryStream` and throws `EndOfStreamException` on the render thread.
+
+**A previous version of this section blamed `RecordingLogic.cs:200` instead. That was
+wrong** — `UploadRun` returns early at line 155 when `encryptionService.IsAvailable` is
+false, and `encryption.ini` is a CI secret that is not in the repo, so that path is
+unreachable on any local build. Three sites read `StatsCount` unguarded; only the Run
+Analysis one is reachable without encryption.
+
+Why macOS specifically: it is the only platform whose block address is *scanned and
+cached* rather than read fresh from a game-maintained pointer. If the game moves or
+rebuilds the stats array at run end, the cached block can still pass `MainBlock.IsValid`
+(marker, format version, name terminators) while `StatsBase`/`StatsCount` have gone stale.
+Windows and Linux re-read the pointer every frame and cannot land in that state.
+
+If confirmed, the fix is small: bound-check `StatsCount` before allocating (the existing
+`IsReplayValid()` already does exactly this for `ReplayLength`, rejecting
+`<= 0 or > 30 * 1024 * 1024` — the same treatment applied to `StatsCount` would do), and
+re-scan rather than trust a cached block whose derived pointers stopped making sense.
+
+### Scan freezes the UI (open, measured)
+
+`Scan()` runs on the render thread. A cold scan measured 16 s, 46 s, 49 s and 57 s in four
+runs; the real game took 624 MB / 1189 regions and was much faster, but the worst case
+stands. Moving the scan to a background thread is the obvious follow-up.
+`OSXMemoryService` is not thread-safe today — the task-port cache, `_blockBuffer` and
+`_scanBuffer` are all plain fields.
+
+### Wrong advice for one macOS case (open, cosmetic)
+
+`ReplayEditorMenu.DescribeGameMemoryUnavailable` only consults `DescribeUnavailability()`
+for `MemoryUnreadable`; for `BlockNotFound` it falls back to "Make sure the game is
+running", which on macOS is exactly wrong — the game *is* running and its memory *was*
+read.
 
 ## 8. Explicitly out of scope
 
